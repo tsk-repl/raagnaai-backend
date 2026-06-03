@@ -1,0 +1,14 @@
+{
+  "name": "raagnaai-backend",
+  "version": "1.0.0",
+  "description": "Raagnaai Ads content engine backend — brain synthesis, ElevenLabs audio, JSON2Video, Make.com posting",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
