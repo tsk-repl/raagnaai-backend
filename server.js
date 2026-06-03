@@ -279,10 +279,11 @@ app.post("/brain", async (req, res) => {
       const draftText = `Original brief:\n${ut}\n\n` + ok.map((n, i) => `--- Draft ${i + 1} (${n}) ---\n${JSON.stringify(drafts[n])}`).join("\n\n");
       final = await callClaude(CLAUDE_SYNTH_MODEL, synthPrompt(dna, job.input.language), draftText, null);
       synthBy = CLAUDE_SYNTH_MODEL;
+      final._meta = { models: ok, synthesizedBy: synthBy, drafts };
     } else {
-      final = drafts[ok[0]]; // only one model available — no synthesis needed
+      final = { ...drafts[ok[0]] }; // single model — clone so we never reference ourselves
+      final._meta = { models: ok, synthesizedBy: null };
     }
-    final._meta = { models: ok, synthesizedBy: synthBy, drafts };
     res.json(final);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
