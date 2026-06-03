@@ -123,33 +123,50 @@ app.post("/generate-audio", async (req, res) => {
 // ============================================================
 app.post("/render-video", async (req, res) => {
   try {
-    const { audioUrl, imageBrief, imageBase64, visualHint, logoBase64, logoMediaType, voiceId, language } = req.body;
+    const { audioUrl, imageBrief, imageBase64, imageMediaType, visualHint, logoBase64, logoMediaType, voiceId, language, images, audioSeconds } = req.body;
     if (!JSON2VIDEO_API_KEY) throw new Error("JSON2VIDEO_API_KEY not set");
     if (!audioUrl) throw new Error("No approved audioUrl");
 
-    // host the operator's activity photo so JSON2Video can fetch it (needs a URL, not base64)
-    let imageUrl = null, resolution = VIDEO_RESOLUTION;
-    if (imageBase64) {
-      const buf = Buffer.from(imageBase64, "base64");
-      imageUrl = saveMedia(buf, "jpg");
-      // match the video shape to the photo so there are no black bars
-      const dims = imageDims(buf);
-      if (dims) resolution = dims.w > dims.h * 1.15 ? "full-hd"
-        : dims.h > dims.w * 1.15 ? "instagram-story" : "squared";
-    }
+    // gather one or many activity photos, host each (JSON2Video needs URLs)
+    const imgList = (Array.isArray(images) && images.length) ? images
+      : (imageBase64 ? [{ base64: imageBase64, mediaType: imageMediaType }] : []);
+    const hosted = imgList.map(im => saveMedia(Buffer.from(im.base64, "base64"), /png/i.test(im.mediaType || "") ? "png" : "jpg"));
 
-    const elements = [];
-    // resize:cover fills the frame; zoom gives a slow Ken-Burns motion so one photo isn't static
-    if (imageUrl) elements.push({ type: "image", src: imageUrl, duration: -2, resize: "cover", zoom: 2 });
-    elements.push({ type: "audio", src: audioUrl, duration: -1 });                  // sets the scene length
-    if (imageBrief?.on_screen_text)                                                 // optional overlay
-      elements.push({ type: "text", text: imageBrief.on_screen_text, duration: -2, position: "bottom-center", style: "005" });
-
-    // branded end card — your uploaded logo if provided, otherwise a text card,
-    // with a spoken brand tagline over it (in the post's language, your cloned voice)
+    // match the video shape to the (first) photo so there are no black bars
+    let resolution = VIDEO_RESOLUTION;
+    if (imgList[0]) { const d = imageDims(Buffer.from(imgList[0].base64, "base64")); if (d) resolution = d.w > d.h * 1.15 ? "full-hd" : d.h > d.w * 1.15 ? "instagram-story" : "squared"; }
     const dimMap = { "full-hd": [1920, 1080], "instagram-story": [1080, 1920], "squared": [1080, 1080] };
     const [W, H] = dimMap[resolution] || [1920, 1080];
 
+    // cinematic moves — alternating zoom direction + pan for a rich, non-static look
+    const moves = [{ zoom: 2, pan: "right" }, { zoom: -2, pan: "left" }, { zoom: 3, pan: "top" }, { zoom: -2, pan: "bottom" }, { zoom: 2, pan: "left" }, { zoom: -3, pan: "right" }];
+    const secs = Number(audioSeconds) > 0 ? Number(audioSeconds) : null;
+    const movieElements = [];
+    let contentScenes;
+
+    if (hosted.length > 1 && secs) {
+      // slideshow: each photo gets an equal slice of the voiceover, with cross-fades
+      const each = Math.max(1.8, secs / hosted.length);
+      contentScenes = hosted.map((url, i) => {
+        const m = moves[i % moves.length];
+        const sc = { duration: each, elements: [{ type: "image", src: url, resize: "cover", zoom: m.zoom, pan: m.pan, duration: each }] };
+        if (i > 0) sc.transition = { style: "fade", duration: 0.4 };
+        return sc;
+      });
+      movieElements.push({ type: "audio", src: audioUrl, duration: -1 });          // voiceover across all photos
+      if (imageBrief?.on_screen_text)
+        movieElements.push({ type: "text", text: imageBrief.on_screen_text, position: "bottom-center", style: "005", duration: each * hosted.length });
+    } else {
+      // single photo: the voiceover drives one scene, slow zoom for motion
+      const els = [];
+      if (hosted[0]) els.push({ type: "image", src: hosted[0], duration: -2, resize: "cover", zoom: 2 });
+      els.push({ type: "audio", src: audioUrl, duration: -1 });
+      if (imageBrief?.on_screen_text) els.push({ type: "text", text: imageBrief.on_screen_text, duration: -2, position: "bottom-center", style: "005" });
+      contentScenes = [{ elements: els }];
+    }
+
+    // branded end card — your uploaded logo if provided, otherwise a text card,
+    // with a spoken brand tagline over it (in the post's language, your cloned voice)
     let taglineUrl = null;
     if (voiceId) { try { taglineUrl = await elevenTTS(voiceId, TAGLINE[language] || TAGLINE.en); } catch (_) {} }
     const visDur = taglineUrl ? -2 : 2.6;   // if there's a tagline, the visual matches the audio length
@@ -169,10 +186,11 @@ app.post("/render-video", async (req, res) => {
     }
     if (taglineUrl) outroEls.push({ type: "audio", src: taglineUrl, duration: -1 });
     const outroScene = taglineUrl
-      ? { "background-color": outroBg, elements: outroEls }          // length follows the spoken tagline
-      : { "background-color": outroBg, duration: 2.6, elements: outroEls };
+      ? { "background-color": outroBg, transition: { style: "fade", duration: 0.4 }, elements: outroEls }
+      : { "background-color": outroBg, duration: 2.6, transition: { style: "fade", duration: 0.4 }, elements: outroEls };
 
-    const movie = { resolution, quality: "high", scenes: [{ elements }, outroScene] };
+    const movie = { resolution, quality: "high", scenes: [...contentScenes, outroScene] };
+    if (movieElements.length) movie.elements = movieElements;
 
     const create = await fetch("https://api.json2video.com/v2/movies", {
       method: "POST",
@@ -185,7 +203,7 @@ app.post("/render-video", async (req, res) => {
 
     // poll until done (or switch to a webhook export for production — see note below)
     let videoUrl = null;
-    for (let i = 0; i < 60; i++) {           // ~5 min max at 5s intervals
+    for (let i = 0; i < 90; i++) {           // ~7.5 min max (slideshows + transitions render slower)
       await new Promise(r => setTimeout(r, 5000));
       const s = await fetch(`https://api.json2video.com/v2/movies?project=${projectId}`, {
         headers: { "x-api-key": JSON2VIDEO_API_KEY },
