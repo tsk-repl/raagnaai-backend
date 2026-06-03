@@ -58,34 +58,59 @@ function saveMedia(buffer, ext) {
   return `${PUBLIC_BASE_URL.replace(/\/$/, "")}/media/${name}`;
 }
 
+// Read width/height from a JPEG or PNG buffer (no extra libraries). Returns {w,h} or null.
+function imageDims(buf) {
+  try {
+    if (buf[0] === 0x89 && buf[1] === 0x50) // PNG
+      return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+    if (buf[0] === 0xFF && buf[1] === 0xD8) { // JPEG — scan for the SOF marker
+      let i = 2;
+      while (i < buf.length) {
+        if (buf[i] !== 0xFF) { i++; continue; }
+        const m = buf[i + 1];
+        if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC)
+          return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+        i += 2 + buf.readUInt16BE(i + 2);
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 // ============================================================
 // 1) AUDIO — ElevenLabs (own key + cloned voice). Standalone file so the operator
 //    can listen and approve BEFORE the video is built. This is why we generate audio
 //    here rather than inside the JSON2Video render — and it gives full model control,
 //    which is the best Telugu quality.
 // ============================================================
+// Reusable ElevenLabs TTS → returns a hosted MP3 URL
+async function elevenTTS(voiceId, text, voiceHint) {
+  if (!ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY not set");
+  if (!voiceId) throw new Error("No voiceId — set the cloned voice ID in the dashboard");
+  const slower = /slow|clear|calm/i.test(voiceHint || "");
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+    method: "POST",
+    headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text, model_id: ELEVENLABS_MODEL,
+      voice_settings: { stability: slower ? 0.6 : 0.4, similarity_boost: 0.85, style: 0.2, use_speaker_boost: true },
+    }),
+  });
+  if (!r.ok) throw new Error(`ElevenLabs ${r.status}: ${await r.text()}`);
+  return saveMedia(Buffer.from(await r.arrayBuffer()), "mp3");
+}
+
+// Spoken brand sign-off played over the logo end card (per language)
+const TAGLINE = {
+  te: "రాగ్నాయి యాడ్స్. రండి, కస్టమర్‌ని పలకరిద్దాం.",
+  hi: "रागनाई ऐड्स. आइए, ग्राहक का स्वागत करते हैं.",
+  en: "Raagnaai Ads. Come, let's greet the customer.",
+};
+
 app.post("/generate-audio", async (req, res) => {
   try {
     const { voiceId, text, voiceHint } = req.body;
-    if (!ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY not set");
-    if (!voiceId) throw new Error("No voiceId — set the cloned voice ID in the dashboard");
-
-    // voice_settings let you nudge delivery; a 'voiceHint' that asks for slower/clearer
-    // can lower stability. For wording/pronunciation fixes, prefer editing the text
-    // (the dashboard's "fix the words" path), which routes back through the brain.
-    const slower = /slow|clear|calm/i.test(voiceHint || "");
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-      method: "POST",
-      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        model_id: ELEVENLABS_MODEL,
-        voice_settings: { stability: slower ? 0.6 : 0.4, similarity_boost: 0.85, style: 0.2, use_speaker_boost: true },
-      }),
-    });
-    if (!r.ok) throw new Error(`ElevenLabs ${r.status}: ${await r.text()}`);
-    const buf = Buffer.from(await r.arrayBuffer());
-    const audioUrl = saveMedia(buf, "mp3");
+    const audioUrl = await elevenTTS(voiceId, text, voiceHint);
     res.json({ audioUrl, seconds: null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -98,21 +123,56 @@ app.post("/generate-audio", async (req, res) => {
 // ============================================================
 app.post("/render-video", async (req, res) => {
   try {
-    const { audioUrl, imageBrief, imageBase64, visualHint } = req.body;
+    const { audioUrl, imageBrief, imageBase64, visualHint, logoBase64, logoMediaType, voiceId, language } = req.body;
     if (!JSON2VIDEO_API_KEY) throw new Error("JSON2VIDEO_API_KEY not set");
     if (!audioUrl) throw new Error("No approved audioUrl");
 
     // host the operator's activity photo so JSON2Video can fetch it (needs a URL, not base64)
-    let imageUrl = null;
-    if (imageBase64) imageUrl = saveMedia(Buffer.from(imageBase64, "base64"), "jpg");
+    let imageUrl = null, resolution = VIDEO_RESOLUTION;
+    if (imageBase64) {
+      const buf = Buffer.from(imageBase64, "base64");
+      imageUrl = saveMedia(buf, "jpg");
+      // match the video shape to the photo so there are no black bars
+      const dims = imageDims(buf);
+      if (dims) resolution = dims.w > dims.h * 1.15 ? "full-hd"
+        : dims.h > dims.w * 1.15 ? "instagram-story" : "squared";
+    }
 
     const elements = [];
-    if (imageUrl) elements.push({ type: "image", src: imageUrl, duration: -2 });   // fills the scene
+    // resize:cover fills the frame; zoom gives a slow Ken-Burns motion so one photo isn't static
+    if (imageUrl) elements.push({ type: "image", src: imageUrl, duration: -2, resize: "cover", zoom: 2 });
     elements.push({ type: "audio", src: audioUrl, duration: -1 });                  // sets the scene length
     if (imageBrief?.on_screen_text)                                                 // optional overlay
       elements.push({ type: "text", text: imageBrief.on_screen_text, duration: -2, position: "bottom-center", style: "005" });
 
-    const movie = { resolution: VIDEO_RESOLUTION, quality: "high", scenes: [{ elements }] };
+    // branded end card — your uploaded logo if provided, otherwise a text card,
+    // with a spoken brand tagline over it (in the post's language, your cloned voice)
+    const dimMap = { "full-hd": [1920, 1080], "instagram-story": [1080, 1920], "squared": [1080, 1080] };
+    const [W, H] = dimMap[resolution] || [1920, 1080];
+
+    let taglineUrl = null;
+    if (voiceId) { try { taglineUrl = await elevenTTS(voiceId, TAGLINE[language] || TAGLINE.en); } catch (_) {} }
+    const visDur = taglineUrl ? -2 : 2.6;   // if there's a tagline, the visual matches the audio length
+    const outroEls = [];
+    let outroBg = "#cf4a26";
+    if (logoBase64) {
+      outroBg = "#ffffff";
+      const logoUrl = saveMedia(Buffer.from(logoBase64, "base64"), /png/i.test(logoMediaType || "") ? "png" : "jpg");
+      outroEls.push({ type: "image", src: logoUrl, width: Math.round(W * 0.6), height: -1, position: "center-center", duration: visDur });
+    } else {
+      const outroHtml =
+        `<div style="width:${W}px;height:${H}px;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#cf4a26;font-family:Inter,Arial,sans-serif;color:#fff;text-align:center;">`
+        + `<div style="font-size:${Math.round(W * 0.07)}px;font-weight:800;letter-spacing:-2px;line-height:1;">Raagnaai Ads</div>`
+        + `<div style="font-size:${Math.round(W * 0.028)}px;font-weight:500;margin-top:${Math.round(H * 0.03)}px;opacity:.92;">Traditional marketing. Real local dominance.</div>`
+        + `</div>`;
+      outroEls.push({ type: "html", html: outroHtml, x: 0, y: 0, width: W, height: H, duration: visDur });
+    }
+    if (taglineUrl) outroEls.push({ type: "audio", src: taglineUrl, duration: -1 });
+    const outroScene = taglineUrl
+      ? { "background-color": outroBg, elements: outroEls }          // length follows the spoken tagline
+      : { "background-color": outroBg, duration: 2.6, elements: outroEls };
+
+    const movie = { resolution, quality: "high", scenes: [{ elements }, outroScene] };
 
     const create = await fetch("https://api.json2video.com/v2/movies", {
       method: "POST",
