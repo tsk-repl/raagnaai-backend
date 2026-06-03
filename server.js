@@ -227,15 +227,18 @@ app.post("/render-video", async (req, res) => {
 // ============================================================
 app.post("/post", async (req, res) => {
   try {
-    const { channels, package: pkg, videoUrl, imageUrl } = req.body;
+    const { items, channels, package: pkg, videoUrl, imageUrl } = req.body;
     if (!MAKE_WEBHOOK_URL) throw new Error("MAKE_WEBHOOK_URL not set");
+    // items = per-channel payloads (text in its language + the matching-language video);
+    // older single-language callers still work via the channels/package/videoUrl shape.
+    const payload = items ? { items } : { channels, package: pkg, videoUrl, imageUrl };
     const r = await fetch(MAKE_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channels, package: pkg, videoUrl, imageUrl }),
+      body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`Make.com ${r.status}`);
-    res.json({ posted: channels });
+    res.json({ posted: items ? items.map(i => i.channel) : channels });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -246,6 +249,19 @@ app.post("/post", async (req, res) => {
 //    single-model Claude preview. ~4 model calls per post.
 // ============================================================
 const LANG_LABEL = { te: "Telugu", hi: "Hindi", en: "English" };
+
+// Per-platform language policy: which language the VIDEO (voiceover) is in, and which
+// language the TEXT (caption/description) is in. Edit any line to change the rule.
+const POLICY = {
+  facebook:  { video: "te", text: "te" },
+  instagram: { video: "te", text: "te" },
+  youtube:   { video: "te", text: "en" },
+  linkedin:  { video: "en", text: "en" },
+  gmb:       { video: "te", text: "te" },
+  blog:      { video: "en", text: "en" },
+};
+const videoLangsOf = (plats) => [...new Set((plats || []).map(p => (POLICY[p] || {}).video).filter(Boolean))];
+
 function systemPrompt(dna) {
   return `You are the marketing intelligence for Raagnaai Ads. Turn one activity (photo and/or idea) into a complete, on-strategy, multi-platform content package. You are the only strategist; the tools after you only execute.
 
@@ -256,21 +272,33 @@ Think silently then output ONLY JSON:
 1. If a photo is attached, describe the ACTUAL activity (hoarding, bus wrap, wall painting, auto-top, location cues, scale) and write about THIS job, not generic copy.
 2. One angle, one emotion, one CTA. Everything serves that single CTA.
 3. Match each platform's native shape.
-Language: write natively and conversationally in the requested language — never a translation, never robotic; use the borrowed English words people actually say; correct script.
-Video: full_voiceover_text is ONLY spoken words (no stage directions). Tight, 15-40s.
-Output ONLY this JSON (captions only for requested platforms; always strategy, video_script, image_brief):
-{"language":"","activity_seen":"","strategy":{"angle":"","target_emotion":"","cta":""},"captions":{"facebook":{"text":"","hashtags":[]},"instagram":{"text":"","hashtags":[]},"linkedin":{"text":"","hashtags":[]}},"video_script":{"hook":"","body":"","cta":"","full_voiceover_text":"","estimated_seconds":0},"youtube":{"title":"","description":""},"gmb_post":{"text":"","cta_button_type":"CALL|BOOK|LEARN_MORE|ORDER"},"blog":{"title":"","body_html":""},"image_brief":{"concept":"","on_screen_text":"","style":""}}
+
+LANGUAGES — this is critical:
+- You will be told which VIDEO languages to write voiceover scripts in, and which language each platform's TEXT must be in. Follow it exactly.
+- Write each piece natively and conversationally in its language — never a translation, never robotic; use the borrowed English words people actually say; correct script.
+
+VIDEO SCRIPTS: in "scripts", include ONE entry per requested video-language key (e.g. "te","en"). full_voiceover_text is ONLY spoken words (no stage directions), tight (15-40s). on_screen_text is a short overlay line in that same language.
+
+Output ONLY this JSON (include captions/sections only for requested platforms; always strategy + scripts + image_brief):
+{"strategy":{"angle":"","target_emotion":"","cta":""},"scripts":{"<langkey>":{"full_voiceover_text":"","on_screen_text":"","estimated_seconds":0}},"captions":{"facebook":{"text":"","hashtags":[]},"instagram":{"text":"","hashtags":[]},"linkedin":{"text":"","hashtags":[]}},"youtube":{"title":"","description":""},"gmb_post":{"text":"","cta_button_type":"CALL|BOOK|LEARN_MORE|ORDER"},"blog":{"title":"","body_html":""},"image_brief":{"concept":"","style":""}}
 Blog: body_html must be valid HTML (<p>, <h2>, <strong>), no markdown, ~130 words.`;
 }
-function synthPrompt(dna, language) {
-  return `You are the chief editor of Raagnaai Ads' marketing brain. Several AI models each wrote an independent content package for the same brief. Produce ONE final package that is BETTER than any single draft. Do NOT average — choose the strongest strategic angle, the most natural-sounding ${LANG_LABEL[language]} (must read like a real speaker, never translated), the sharpest hook, and the single clearest CTA, then combine the best parts. Keep the EXACT same JSON schema and output ONLY JSON.
+function synthPrompt(dna) {
+  return `You are the chief editor of Raagnaai Ads' marketing brain. Several AI models each wrote an independent content package for the same brief. Produce ONE final package that is BETTER than any single draft. Do NOT average — choose the strongest strategic angle, the most natural-sounding wording in EACH language (must read like a real speaker, never translated), the sharpest hook, and the single clearest CTA, then combine the best parts. Keep the EXACT same JSON schema and the same language keys, and output ONLY JSON.
 
 BUSINESS DNA (ground truth):
 ${dna}`;
 }
 function buildUserText(job) {
-  return `Idea: ${job.input.idea || "(work from the photo)"}\nPlatforms: ${job.input.platforms.join(", ")}\nLanguage: ${LANG_LABEL[job.input.language]} (${job.input.language})` +
-    (job.feedback ? `\nCorrection requested: "${job.feedback}"\nPrevious draft: ${JSON.stringify(job.package)}` : "");
+  const plats = job.input.platforms || [];
+  const vlangs = (job.input.videoLangs && job.input.videoLangs.length) ? job.input.videoLangs : videoLangsOf(plats);
+  const textLines = plats.map(p => `${p}: text in ${LANG_LABEL[(POLICY[p] || {}).text] || "English"}`).join("; ");
+  return `Idea: ${job.input.idea || "(work from the photo)"}\n`
+    + `The idea may be spoken/typed in: ${LANG_LABEL[job.input.language] || "English"}.\n`
+    + `Selected platforms: ${plats.join(", ")}.\n`
+    + `Write voiceover scripts for these VIDEO languages (use these exact keys in "scripts"): ${vlangs.join(", ")} (${vlangs.map(l => LANG_LABEL[l]).join(", ")}).\n`
+    + `Per-platform TEXT languages: ${textLines}.`
+    + (job.feedback ? `\nCorrection requested: "${job.feedback}"\nPrevious draft: ${JSON.stringify(job.package)}` : "");
 }
 function parseJson(text) {
   let t = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
@@ -355,7 +383,7 @@ app.post("/brain", async (req, res) => {
     let final, synthBy = null;
     if (ANTHROPIC_API_KEY && ok.length > 1) {
       const draftText = `Original brief:\n${ut}\n\n` + ok.map((n, i) => `--- Draft ${i + 1} (${n}) ---\n${JSON.stringify(drafts[n])}`).join("\n\n");
-      final = await callClaude(CLAUDE_SYNTH_MODEL, synthPrompt(dna, job.input.language), draftText, null);
+      final = await callClaude(CLAUDE_SYNTH_MODEL, synthPrompt(dna), draftText, null);
       synthBy = CLAUDE_SYNTH_MODEL;
       final._meta = { models: ok, synthesizedBy: synthBy, drafts };
     } else {
