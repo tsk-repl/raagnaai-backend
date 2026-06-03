@@ -197,7 +197,19 @@ function buildUserText(job) {
 function parseJson(text) {
   let t = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const s = t.indexOf("{"), e = t.lastIndexOf("}");
-  return JSON.parse(t.slice(s, e + 1));
+  if (s >= 0 && e >= 0) t = t.slice(s, e + 1);
+  try { return JSON.parse(t); } catch (_) {}
+  // repair: escape raw line breaks/tabs that landed inside string values, drop trailing commas
+  let out = "", inStr = false, prev = "";
+  for (const ch of t) {
+    if (ch === '"' && prev !== "\\") inStr = !inStr;
+    if (inStr && ch === "\n") { out += "\\n"; prev = ch; continue; }
+    if (inStr && ch === "\r") { out += "\\r"; prev = ch; continue; }
+    if (inStr && ch === "\t") { out += "\\t"; prev = ch; continue; }
+    out += ch; prev = ch;
+  }
+  out = out.replace(/,(\s*[}\]])/g, "$1");
+  return JSON.parse(out);
 }
 
 // --- provider drafts (each returns the same JSON package) ---
@@ -208,7 +220,7 @@ async function callClaude(model, system, text, image) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
-    body: JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({ model, max_tokens: 8192, system, messages: [{ role: "user", content }] }),
   });
   if (!r.ok) throw new Error(`Claude ${r.status}: ${await r.text()}`);
   const d = await r.json();
@@ -220,7 +232,7 @@ async function callOpenAI(model, system, text, image) {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: uc }], response_format: { type: "json_object" }, max_completion_tokens: 4096 }),
+    body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: uc }], response_format: { type: "json_object" }, max_completion_tokens: 8192 }),
   });
   if (!r.ok) throw new Error(`OpenAI ${r.status}: ${await r.text()}`);
   const d = await r.json();
@@ -232,7 +244,7 @@ async function callGemini(model, system, text, image) {
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: { "x-goog-api-key": GOOGLE_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ system_instruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts }], generationConfig: { maxOutputTokens: 4096, responseMimeType: "application/json" } }),
+    body: JSON.stringify({ system_instruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts }], generationConfig: { maxOutputTokens: 8192, responseMimeType: "application/json" } }),
   });
   if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
   const d = await r.json();
