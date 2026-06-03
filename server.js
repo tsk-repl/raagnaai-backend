@@ -214,7 +214,7 @@ app.post("/render-video", async (req, res) => {
       if (status === "error") throw new Error("JSON2Video render error: " + (data.movie.message || ""));
     }
     if (!videoUrl) throw new Error("Render timed out");
-    res.json({ videoUrl, imageUrl });
+    res.json({ videoUrl, imageUrl: hosted[0] || null });
     // PRODUCTION TIP: instead of polling, add to `movie`:
     //   exports: [{ destinations: [{ type: "webhook", endpoint: `${PUBLIC_BASE_URL}/json2video-hook` }] }]
     // and return immediately; mark the job done when the hook fires. Cheaper and more reliable.
