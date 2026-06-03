@@ -138,18 +138,21 @@ app.post("/render-video", async (req, res) => {
     const dimMap = { "full-hd": [1920, 1080], "instagram-story": [1080, 1920], "squared": [1080, 1080] };
     const [W, H] = dimMap[resolution] || [1920, 1080];
 
-    // cinematic moves — alternating zoom direction + pan for a rich, non-static look
-    const moves = [{ zoom: 2, pan: "right" }, { zoom: -2, pan: "left" }, { zoom: 3, pan: "top" }, { zoom: -2, pan: "bottom" }, { zoom: 2, pan: "left" }, { zoom: -3, pan: "right" }];
+    // cinematic moves — gentle alternating zoom (kept modest so the whole photo stays visible)
+    const zooms = [1.5, -1.5, 2, -2, 1.5, -2];
     const secs = Number(audioSeconds) > 0 ? Number(audioSeconds) : null;
     const movieElements = [];
     let contentScenes;
+
+    // a soft, enlarged, blurred copy of the same photo fills the frame behind the full photo,
+    // so nothing is ever cropped but there are no empty bars either
+    const blurBg = (url, dur) => ({ type: "html", html: `<div style="width:${W}px;height:${H}px;background:#1a1714 url('${url}') center center / cover no-repeat;filter:blur(34px) brightness(0.7);transform:scale(1.3);"></div>`, x: 0, y: 0, width: W, height: H, duration: dur });
 
     if (hosted.length > 1 && secs) {
       // slideshow: each photo gets an equal slice of the voiceover, with cross-fades
       const each = Math.max(1.8, secs / hosted.length);
       contentScenes = hosted.map((url, i) => {
-        const m = moves[i % moves.length];
-        const sc = { duration: each, elements: [{ type: "image", src: url, resize: "cover", zoom: m.zoom, pan: m.pan, duration: each }] };
+        const sc = { duration: each, elements: [blurBg(url, each), { type: "image", src: url, resize: "fit", zoom: zooms[i % zooms.length], duration: each }] };
         if (i > 0) sc.transition = { style: "fade", duration: 0.4 };
         return sc;
       });
@@ -157,9 +160,9 @@ app.post("/render-video", async (req, res) => {
       if (imageBrief?.on_screen_text)
         movieElements.push({ type: "text", text: imageBrief.on_screen_text, position: "bottom-center", style: "005", duration: each * hosted.length });
     } else {
-      // single photo: the voiceover drives one scene, slow zoom for motion
+      // single photo: the voiceover drives one scene, gentle zoom for motion
       const els = [];
-      if (hosted[0]) els.push({ type: "image", src: hosted[0], duration: -2, resize: "cover", zoom: 2 });
+      if (hosted[0]) { els.push(blurBg(hosted[0], -2)); els.push({ type: "image", src: hosted[0], duration: -2, resize: "fit", zoom: 1.5 }); }
       els.push({ type: "audio", src: audioUrl, duration: -1 });
       if (imageBrief?.on_screen_text) els.push({ type: "text", text: imageBrief.on_screen_text, duration: -2, position: "bottom-center", style: "005" });
       contentScenes = [{ elements: els }];
