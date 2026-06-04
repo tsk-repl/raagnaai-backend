@@ -149,8 +149,10 @@ app.post("/render-video", async (req, res) => {
     const blurBg = (url, dur) => ({ type: "html", html: `<div style="width:${W}px;height:${H}px;background:#1a1714 url('${url}') center center / cover no-repeat;filter:blur(34px) brightness(0.7);transform:scale(1.3);"></div>`, x: 0, y: 0, width: W, height: H, duration: dur });
 
     if (hosted.length > 1 && secs) {
-      // slideshow: each photo gets an equal slice of the voiceover, with cross-fades
-      const each = Math.max(1.8, secs / hosted.length);
+      // slideshow: photos cover the voiceover PLUS a short silent hold at the end,
+      // so the script fully finishes before the end card appears
+      const hold = 1.3;
+      const each = Math.max(2.0, (secs + hold) / hosted.length);
       contentScenes = hosted.map((url, i) => {
         const sc = { duration: each, elements: [blurBg(url, each), { type: "image", src: url, resize: "fit", zoom: zooms[i % zooms.length], duration: each }] };
         if (i > 0) sc.transition = { style: "fade", duration: 0.4 };
@@ -158,14 +160,14 @@ app.post("/render-video", async (req, res) => {
       });
       movieElements.push({ type: "audio", src: audioUrl, duration: -1 });          // voiceover across all photos
       if (imageBrief?.on_screen_text)
-        movieElements.push({ type: "text", text: imageBrief.on_screen_text, position: "bottom-center", style: "005", duration: each * hosted.length });
+        movieElements.push({ type: "text", text: imageBrief.on_screen_text, position: "bottom-center", style: "005", duration: secs });
     } else {
-      // single photo: the voiceover drives one scene, gentle zoom for motion
+      // single photo: voiceover plays, then a short silent hold before the end card
       const els = [];
       if (hosted[0]) { els.push(blurBg(hosted[0], -2)); els.push({ type: "image", src: hosted[0], duration: -2, resize: "fit", zoom: 2 }); }
       els.push({ type: "audio", src: audioUrl, duration: -1 });
       if (imageBrief?.on_screen_text) els.push({ type: "text", text: imageBrief.on_screen_text, duration: -2, position: "bottom-center", style: "005" });
-      contentScenes = [{ elements: els }];
+      contentScenes = [secs ? { duration: secs + 1.3, elements: els } : { elements: els }];
     }
 
     // branded end card — your uploaded logo if provided, otherwise a text card,
@@ -187,7 +189,7 @@ app.post("/render-video", async (req, res) => {
         + `</div>`;
       outroEls.push({ type: "html", html: outroHtml, x: 0, y: 0, width: W, height: H, duration: visDur });
     }
-    if (taglineUrl) outroEls.push({ type: "audio", src: taglineUrl, duration: -1 });
+    if (taglineUrl) outroEls.push({ type: "audio", src: taglineUrl, start: 0.6, duration: -1 });
     const outroScene = taglineUrl
       ? { "background-color": outroBg, transition: { style: "fade", duration: 0.4 }, elements: outroEls }
       : { "background-color": outroBg, duration: 2.6, transition: { style: "fade", duration: 0.4 }, elements: outroEls };
