@@ -139,7 +139,7 @@ app.post("/render-video", async (req, res) => {
     const [W, H] = dimMap[resolution] || [1920, 1080];
 
     // cinematic moves — gentle alternating zoom (kept modest so the whole photo stays visible)
-    const zooms = [1.5, -1.5, 2, -2, 1.5, -2];
+    const zooms = [1, -1, 2, -2, 1, -2];
     const secs = Number(audioSeconds) > 0 ? Number(audioSeconds) : null;
     const movieElements = [];
     let contentScenes;
@@ -162,7 +162,7 @@ app.post("/render-video", async (req, res) => {
     } else {
       // single photo: the voiceover drives one scene, gentle zoom for motion
       const els = [];
-      if (hosted[0]) { els.push(blurBg(hosted[0], -2)); els.push({ type: "image", src: hosted[0], duration: -2, resize: "fit", zoom: 1.5 }); }
+      if (hosted[0]) { els.push(blurBg(hosted[0], -2)); els.push({ type: "image", src: hosted[0], duration: -2, resize: "fit", zoom: 2 }); }
       els.push({ type: "audio", src: audioUrl, duration: -1 });
       if (imageBrief?.on_screen_text) els.push({ type: "text", text: imageBrief.on_screen_text, duration: -2, position: "bottom-center", style: "005" });
       contentScenes = [{ elements: els }];
