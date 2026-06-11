@@ -146,7 +146,7 @@ app.post("/render-video", async (req, res) => {
 
     // a soft, enlarged, blurred copy of the same photo fills the frame behind the full photo,
     // so nothing is ever cropped but there are no empty bars either
-    const blurBg = (url, dur) => ({ type: "html", html: `<div style="width:${W}px;height:${H}px;background:#1a1714 url('${url}') center center / cover no-repeat;filter:blur(34px) brightness(0.7);transform:scale(1.3);"></div>`, x: 0, y: 0, width: W, height: H, duration: dur });
+    const blurBg = (url, dur) => ({ type: "html", html: `<div style="margin:0;padding:0;position:absolute;top:0;left:0;width:${W}px;height:${H}px;background:#1a1714;overflow:hidden;"><div style="position:absolute;top:-10%;left:-10%;width:120%;height:120%;background:#1a1714 url('${url}') center center / cover no-repeat;filter:blur(34px) brightness(0.7);"></div></div>`, x: 0, y: 0, width: W, height: H, duration: dur });
 
     if (hosted.length > 1 && secs) {
       // slideshow: photos cover the voiceover PLUS a short silent hold at the end,
@@ -297,7 +297,8 @@ ${dna}`;
 function buildUserText(job) {
   const plats = job.input.platforms || [];
   const vlangs = (job.input.videoLangs && job.input.videoLangs.length) ? job.input.videoLangs : videoLangsOf(plats);
-  const textLines = plats.map(p => `${p}: text in ${LANG_LABEL[(POLICY[p] || {}).text] || "English"}`).join("; ");
+  const textLangOf = (p) => (job.input.chanLang && job.input.chanLang[p]) || (POLICY[p] || {}).text;
+  const textLines = plats.map(p => `${p}: text in ${LANG_LABEL[textLangOf(p)] || "English"}`).join("; ");
   return `Idea: ${job.input.idea || "(work from the photo)"}\n`
     + `The idea may be spoken/typed in: ${LANG_LABEL[job.input.language] || "English"}.\n`
     + `Selected platforms: ${plats.join(", ")}.\n`
@@ -323,12 +324,25 @@ function parseJson(text) {
   return JSON.parse(out);
 }
 
+// Retry transient "busy / overloaded / rate-limited" replies from the AI providers
+// (Gemini 503, OpenAI 429, Claude 529) a couple of times with a short backoff,
+// so a momentary hiccup doesn't fail the whole post.
+async function fetchRetry(url, opts, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    last = await fetch(url, opts);
+    if (![429, 503, 529].includes(last.status)) return last;
+    if (i < tries - 1) await new Promise(r => setTimeout(r, 800 * (i + 1)));
+  }
+  return last;
+}
+
 // --- provider drafts (each returns the same JSON package) ---
 async function callClaude(model, system, text, image) {
   const content = [];
   if (image) content.push({ type: "image", source: { type: "base64", media_type: image.mime, data: image.data } });
   content.push({ type: "text", text });
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
+  const r = await fetchRetry("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
     body: JSON.stringify({ model, max_tokens: 8192, system, messages: [{ role: "user", content }] }),
@@ -340,7 +354,7 @@ async function callClaude(model, system, text, image) {
 async function callOpenAI(model, system, text, image) {
   const uc = [{ type: "text", text }];
   if (image) uc.push({ type: "image_url", image_url: { url: `data:${image.mime};base64,${image.data}` } });
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+  const r = await fetchRetry("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: uc }], response_format: { type: "json_object" }, max_completion_tokens: 8192 }),
@@ -352,7 +366,7 @@ async function callOpenAI(model, system, text, image) {
 async function callGemini(model, system, text, image) {
   const parts = [{ text }];
   if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+  const r = await fetchRetry(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: { "x-goog-api-key": GOOGLE_API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ system_instruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts }], generationConfig: { maxOutputTokens: 8192, responseMimeType: "application/json" } }),
