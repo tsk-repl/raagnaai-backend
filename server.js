@@ -23,6 +23,7 @@ import cors from "cors";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { MongoClient } from "mongodb";
 
 // ---------- keys & config (env only — never hard-code) ----------
 const PORT = process.env.PORT || 8080;
@@ -41,6 +42,33 @@ const CLAUDE_DRAFT_MODEL = process.env.CLAUDE_DRAFT_MODEL || "claude-sonnet-4-6"
 const CLAUDE_SYNTH_MODEL = process.env.CLAUDE_SYNTH_MODEL || "claude-opus-4-8"; // does the final merge
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.5";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-pro-preview";
+
+// ---------- shared post storage (MongoDB Atlas) ----------
+// Stores a LIGHTWEIGHT copy of each post so every device/teammate sees the same list.
+// If MONGODB_URI is missing or the DB is unreachable, the rest of the app still works;
+// only the cross-device sync endpoints return an error.
+const MONGODB_URI = process.env.MONGODB_URI;
+let _mongoClient = null, _postsColl = null, _mongoTried = false;
+async function postsCollection() {
+  if (_postsColl) return _postsColl;
+  if (!MONGODB_URI) return null;
+  if (_mongoTried && !_mongoClient) return null; // earlier attempt failed; don't hammer
+  _mongoTried = true;
+  try {
+    _mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
+    await _mongoClient.connect();
+    const db = _mongoClient.db("raagnaai");
+    _postsColl = db.collection("posts");
+    await _postsColl.createIndex({ owner: 1, createdAt: -1 });
+    await _postsColl.createIndex({ owner: 1, id: 1 }, { unique: true });
+    console.log("MongoDB connected — shared post sync is live");
+    return _postsColl;
+  } catch (e) {
+    console.error("MongoDB connection failed:", e.message);
+    _mongoClient = null;
+    return null;
+  }
+}
 
 const app = express();
 app.use(cors());                         // PROD: restrict to your dashboard origin -> cors({ origin: "https://your-dashboard" })
@@ -414,4 +442,46 @@ app.post("/brain", async (req, res) => {
 });
 
 app.get("/health", (_, res) => res.json({ ok: true }));
+
+// ---------- shared post list (cross-device sync) ----------
+// owner = a workspace id so multiple teammates share one list (and a future SaaS can
+// keep different customers' posts separate). Defaults to "raagnaai".
+const ownerOf = (req) => (req.query.owner || req.body?.owner || "raagnaai").toString().slice(0, 80);
+
+// List every post for this workspace, newest first.
+app.get("/posts", async (req, res) => {
+  const coll = await postsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    const docs = await coll.find({ owner: ownerOf(req) }).sort({ createdAt: -1 }).limit(500).toArray();
+    res.json(docs.map(({ _id, ...rest }) => rest)); // hide internal _id
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Create or update one post (upsert by owner+id).
+app.put("/posts/:id", async (req, res) => {
+  const coll = await postsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    const owner = ownerOf(req);
+    const id = req.params.id;
+    const job = req.body?.job || req.body;
+    if (!job || typeof job !== "object") return res.status(400).json({ error: "Missing post body" });
+    const doc = { ...job, id, owner, updatedAt: Date.now() };
+    delete doc._id;
+    await coll.updateOne({ owner, id }, { $set: doc }, { upsert: true });
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete one post.
+app.delete("/posts/:id", async (req, res) => {
+  const coll = await postsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    await coll.deleteOne({ owner: ownerOf(req), id: req.params.id });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.listen(PORT, () => console.log(`Raagnaai backend on ${PUBLIC_BASE_URL}`));
