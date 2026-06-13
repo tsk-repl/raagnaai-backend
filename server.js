@@ -48,27 +48,31 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-pro-preview";
 // If MONGODB_URI is missing or the DB is unreachable, the rest of the app still works;
 // only the cross-device sync endpoints return an error.
 const MONGODB_URI = process.env.MONGODB_URI;
-let _mongoClient = null, _postsColl = null, _mongoTried = false;
-async function postsCollection() {
-  if (_postsColl) return _postsColl;
-  if (!MONGODB_URI) return null;
-  if (_mongoTried && !_mongoClient) return null; // earlier attempt failed; don't hammer
+let _mongoClient = null, _postsColl = null, _settingsColl = null, _mongoTried = false;
+async function ensureMongo() {
+  if (_postsColl) return true;
+  if (!MONGODB_URI) return false;
+  if (_mongoTried && !_mongoClient) return false; // earlier attempt failed; don't hammer
   _mongoTried = true;
   try {
     _mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
     await _mongoClient.connect();
     const db = _mongoClient.db("raagnaai");
     _postsColl = db.collection("posts");
+    _settingsColl = db.collection("settings");
     await _postsColl.createIndex({ owner: 1, createdAt: -1 });
     await _postsColl.createIndex({ owner: 1, id: 1 }, { unique: true });
+    await _settingsColl.createIndex({ owner: 1 }, { unique: true });
     console.log("MongoDB connected — shared post sync is live");
-    return _postsColl;
+    return true;
   } catch (e) {
     console.error("MongoDB connection failed:", e.message);
     _mongoClient = null;
-    return null;
+    return false;
   }
 }
+async function postsCollection() { return (await ensureMongo()) ? _postsColl : null; }
+async function settingsCollection() { return (await ensureMongo()) ? _settingsColl : null; }
 
 const app = express();
 app.use(cors());                         // PROD: restrict to your dashboard origin -> cors({ origin: "https://your-dashboard" })
@@ -480,6 +484,32 @@ app.delete("/posts/:id", async (req, res) => {
   if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
   try {
     await coll.deleteOne({ owner: ownerOf(req), id: req.params.id });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------- shared settings (brand profile across devices) ----------
+// Stores the team's shared brand settings (logo, voice id, Business DNA). The Backend URL
+// and simulate flag are intentionally kept device-local by the dashboard, not stored here.
+app.get("/settings", async (req, res) => {
+  const coll = await settingsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    const doc = await coll.findOne({ owner: ownerOf(req) });
+    if (!doc) return res.json({});
+    const { _id, owner, ...rest } = doc;
+    res.json(rest);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put("/settings", async (req, res) => {
+  const coll = await settingsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    const owner = ownerOf(req);
+    const settings = req.body?.settings || req.body || {};
+    const doc = { ...settings, owner, updatedAt: Date.now() };
+    delete doc._id;
+    await coll.updateOne({ owner }, { $set: doc }, { upsert: true });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
