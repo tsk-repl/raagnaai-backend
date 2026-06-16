@@ -317,8 +317,13 @@ LANGUAGES — this is critical:
 VIDEO SCRIPTS: in "scripts", include ONE entry per requested video-language key (e.g. "te","en"). full_voiceover_text is ONLY spoken words (no stage directions), tight (15-40s). on_screen_text is a short overlay line in that same language.
 
 Output ONLY this JSON (include captions/sections only for requested platforms; always strategy + scripts + image_brief):
-{"strategy":{"angle":"","target_emotion":"","cta":""},"scripts":{"<langkey>":{"full_voiceover_text":"","on_screen_text":"","estimated_seconds":0}},"captions":{"facebook":{"text":"","hashtags":[]},"instagram":{"text":"","hashtags":[]},"linkedin":{"text":"","hashtags":[]}},"youtube":{"title":"","description":""},"gmb_post":{"text":"","cta_button_type":"CALL|BOOK|LEARN_MORE|ORDER"},"blog":{"title":"","body_html":""},"image_brief":{"concept":"","style":""}}
-Blog: body_html must be valid HTML (<p>, <h2>, <strong>), no markdown, ~130 words.`;
+{"strategy":{"angle":"","target_emotion":"","cta":""},"scripts":{"<langkey>":{"full_voiceover_text":"","on_screen_text":"","estimated_seconds":0}},"captions":{"facebook":{"text":"","hashtags":[]},"instagram":{"text":"","hashtags":[]},"linkedin":{"text":"","hashtags":[]}},"youtube":{"title":"","description":""},"gmb_post":{"text":"","cta_button_type":"CALL|BOOK|LEARN_MORE|ORDER"},"blog":{"title":"","body_html":"","focus_keyword":"","meta_description":"","seo_title":""},"image_brief":{"concept":"","style":""}}
+Blog (SEO-ready, all fields required when blog is requested):
+- focus_keyword: ONE short search phrase (2-4 words) a local customer would actually search (e.g. "auto top advertising Hyderabad"). Pick it FIRST, then build everything around it.
+- body_html: valid HTML (<p>, <h2>, <strong>), no markdown, 600-750 words. The focus_keyword MUST appear in the FIRST sentence, in at least one <h2>, and naturally 3-5 times across the body. Use 2-3 <h2> subheadings. Substantive and specific to THIS activity, not padding.
+- title: compelling headline that contains the focus_keyword.
+- seo_title: <= 60 characters, contains the focus_keyword (this is the search-engine title; can differ slightly from title).
+- meta_description: 140-156 characters, contains the focus_keyword, ends with a clear reason to click.`;
 }
 function synthPrompt(dna) {
   return `You are the chief editor of Raagnaai Ads' marketing brain. Several AI models each wrote an independent content package for the same brief. Produce ONE final package that is BETTER than any single draft. Do NOT average — choose the strongest strategic angle, the most natural-sounding wording in EACH language (must read like a real speaker, never translated), the sharpest hook, and the single clearest CTA, then combine the best parts. Keep the EXACT same JSON schema and the same language keys, and output ONLY JSON.
