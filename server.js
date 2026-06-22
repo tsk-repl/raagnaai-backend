@@ -272,7 +272,10 @@ const UP_BASE = "https://api.upload-post.com/api";
 const UP_PLATFORM = { facebook: "facebook", instagram: "instagram", linkedin: "linkedin", youtube: "youtube", gmb: "google_business" };
 
 // Post ONE channel via Upload-Post. Video channels -> /upload (video URL);
-// Google Business -> /upload_photos (image URL), since GBP is not a video platform.
+// Google Business -> /upload_photos, sending the image as an attached file
+// (so Upload-Post never has to reach our backend, which can be asleep on the free tier).
+function clip(s, n) { s = String(s || ""); const first = s.split("\n")[0]; const base = first.length >= 20 ? first : s; return base.length > n ? base.slice(0, n - 1).trimEnd() + "\u2026" : base; }
+
 async function uploadPostOne(apikey, user, item) {
   const form = new FormData();
   form.append("user", user);
@@ -282,19 +285,27 @@ async function uploadPostOne(apikey, user, item) {
     if (item.channel === "gmb") {
       endpoint = `${UP_BASE}/upload_photos`;
       form.append("platform[]", "google_business");
-      if (item.imageUrl) form.append("photos[]", item.imageUrl);
+      if (item.imageUrl) {
+        // download the image ourselves and attach the bytes (URL-fetch by Upload-Post fails when our free backend is asleep)
+        const ir = await fetch(item.imageUrl);
+        if (!ir.ok) throw new Error(`couldn't read image (${ir.status})`);
+        const blob = new Blob([Buffer.from(await ir.arrayBuffer())], { type: ir.headers.get("content-type") || "image/jpeg" });
+        form.append("photos[]", blob, "post.jpg");
+      }
       form.append("title", item.text || item.title || "");
-      // CTA only attached when a destination URL exists (gbp_cta_url is required if a CTA type is set)
       if (item.cta && item.ctaUrl) { form.append("gbp_cta_type", item.cta); form.append("gbp_cta_url", item.ctaUrl); }
     } else {
       endpoint = `${UP_BASE}/upload`;
       form.append("platform[]", UP_PLATFORM[item.channel]);
       if (item.videoUrl) form.append("video", item.videoUrl);
       if (item.channel === "youtube") {
-        form.append("title", item.title || "Video");
+        form.append("title", clip(item.title || "Video", 90));            // YouTube title max 100
         if (item.description) form.append("description", item.description);
+      } else if (item.channel === "facebook") {
+        form.append("title", clip(item.text || item.title || "", 250));   // FB video title max 255
+        form.append("description", item.text || "");                       // full caption shows as the post body
       } else {
-        form.append("title", item.text || item.title || "");
+        form.append("title", item.text || item.title || "");               // IG / LinkedIn caption
       }
     }
     const r = await fetch(endpoint, { method: "POST", headers: { Authorization: `Apikey ${apikey}` }, body: form });
