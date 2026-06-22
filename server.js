@@ -285,12 +285,18 @@ async function uploadPostOne(apikey, user, item) {
     if (item.channel === "gmb") {
       endpoint = `${UP_BASE}/upload_photos`;
       form.append("platform[]", "google_business");
-      if (item.imageUrl) {
-        // download the image ourselves and attach the bytes (URL-fetch by Upload-Post fails when our free backend is asleep)
+      if (item.imageData) {
+        // uploaded activity photo sent straight from the dashboard as base64 — no render, no hosting needed
+        const blob = new Blob([Buffer.from(item.imageData, "base64")], { type: item.imageMediaType || "image/jpeg" });
+        form.append("photos[]", blob, "post.jpg");
+      } else if (item.imageUrl) {
+        // fallback: download a hosted image and attach the bytes (avoids Upload-Post fetching our sleepy backend)
         const ir = await fetch(item.imageUrl);
         if (!ir.ok) throw new Error(`couldn't read image (${ir.status})`);
         const blob = new Blob([Buffer.from(await ir.arrayBuffer())], { type: ir.headers.get("content-type") || "image/jpeg" });
         form.append("photos[]", blob, "post.jpg");
+      } else {
+        throw new Error("no image for Google Business (upload a photo)");
       }
       form.append("title", item.text || item.title || "");
       if (item.cta && item.ctaUrl) { form.append("gbp_cta_type", item.cta); form.append("gbp_cta_url", item.ctaUrl); }
