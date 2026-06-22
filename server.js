@@ -48,7 +48,7 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-pro-preview";
 // If MONGODB_URI is missing or the DB is unreachable, the rest of the app still works;
 // only the cross-device sync endpoints return an error.
 const MONGODB_URI = process.env.MONGODB_URI;
-let _mongoClient = null, _postsColl = null, _settingsColl = null, _mongoTried = false;
+let _mongoClient = null, _postsColl = null, _settingsColl = null, _clientsColl = null, _mongoTried = false;
 async function ensureMongo() {
   if (_postsColl) return true;
   if (!MONGODB_URI) return false;
@@ -60,9 +60,11 @@ async function ensureMongo() {
     const db = _mongoClient.db("raagnaai");
     _postsColl = db.collection("posts");
     _settingsColl = db.collection("settings");
+    _clientsColl = db.collection("clients");
     await _postsColl.createIndex({ owner: 1, createdAt: -1 });
     await _postsColl.createIndex({ owner: 1, id: 1 }, { unique: true });
     await _settingsColl.createIndex({ owner: 1 }, { unique: true });
+    await _clientsColl.createIndex({ roster: 1 }, { unique: true });
     console.log("MongoDB connected — shared post sync is live");
     return true;
   } catch (e) {
@@ -73,6 +75,7 @@ async function ensureMongo() {
 }
 async function postsCollection() { return (await ensureMongo()) ? _postsColl : null; }
 async function settingsCollection() { return (await ensureMongo()) ? _settingsColl : null; }
+async function clientsCollection() { return (await ensureMongo()) ? _clientsColl : null; }
 
 const app = express();
 app.use(cors());                         // PROD: restrict to your dashboard origin -> cors({ origin: "https://your-dashboard" })
@@ -515,6 +518,30 @@ app.put("/settings", async (req, res) => {
     const doc = { ...settings, owner, updatedAt: Date.now() };
     delete doc._id;
     await coll.updateOne({ owner }, { $set: doc }, { upsert: true });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------- client roster (multi-tenant) ----------
+// The operator's list of clients/workspaces. Each client's posts & settings are already
+// isolated by `owner` elsewhere; this just stores the roster so it syncs across devices.
+// Single roster ("default") for now; becomes per-operator-account when self-serve auth lands.
+app.get("/clients", async (req, res) => {
+  const coll = await clientsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    const roster = String(req.query.roster || "default");
+    const doc = await coll.findOne({ roster });
+    res.json({ clients: (doc && Array.isArray(doc.clients)) ? doc.clients : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put("/clients", async (req, res) => {
+  const coll = await clientsCollection();
+  if (!coll) return res.status(503).json({ error: "Shared storage is not configured (MONGODB_URI missing or unreachable)." });
+  try {
+    const roster = String(req.query.roster || req.body?.roster || "default");
+    const clients = Array.isArray(req.body?.clients) ? req.body.clients : [];
+    await coll.updateOne({ roster }, { $set: { roster, clients, updatedAt: Date.now() } }, { upsert: true });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
