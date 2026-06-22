@@ -32,7 +32,8 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_MODEL = process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2"; // best Telugu/Hindi quality
 const JSON2VIDEO_API_KEY = process.env.JSON2VIDEO_API_KEY;
 const VIDEO_RESOLUTION = process.env.VIDEO_RESOLUTION || "instagram-story";          // vertical 1080x1920; change as needed
-const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;       // Make.com scenario that fans out to FB/IG/LinkedIn/YT/GMB/Blog
+const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;       // legacy Make.com scenario (now only used for the WordPress blog during transition)
+const UPLOADPOST_API_KEY = process.env.UPLOADPOST_API_KEY;  // Upload-Post unified posting API (FB/IG/LinkedIn/YouTube/GMB)
 // ---- brain: three models draft, Claude synthesises the final ----
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;    // Claude (draft + final synthesis)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;          // ChatGPT draft
@@ -265,20 +266,78 @@ app.post("/render-video", async (req, res) => {
 // 3) POST — hand the approved package + video to your Make.com scenario, which fans
 //    out to the channels the operator selected.
 // ============================================================
+// ---- Upload-Post posting layer (replaces Make for the 5 social channels) ----
+const UP_BASE = "https://api.upload-post.com/api";
+// our channel id -> Upload-Post platform identifier
+const UP_PLATFORM = { facebook: "facebook", instagram: "instagram", linkedin: "linkedin", youtube: "youtube", gmb: "google_business" };
+
+// Post ONE channel via Upload-Post. Video channels -> /upload (video URL);
+// Google Business -> /upload_photos (image URL), since GBP is not a video platform.
+async function uploadPostOne(apikey, user, item) {
+  const form = new FormData();
+  form.append("user", user);
+  form.append("async_upload", "true");
+  try {
+    let endpoint;
+    if (item.channel === "gmb") {
+      endpoint = `${UP_BASE}/upload_photos`;
+      form.append("platform[]", "google_business");
+      if (item.imageUrl) form.append("photos[]", item.imageUrl);
+      form.append("title", item.text || item.title || "");
+      // CTA only attached when a destination URL exists (gbp_cta_url is required if a CTA type is set)
+      if (item.cta && item.ctaUrl) { form.append("gbp_cta_type", item.cta); form.append("gbp_cta_url", item.ctaUrl); }
+    } else {
+      endpoint = `${UP_BASE}/upload`;
+      form.append("platform[]", UP_PLATFORM[item.channel]);
+      if (item.videoUrl) form.append("video", item.videoUrl);
+      if (item.channel === "youtube") {
+        form.append("title", item.title || "Video");
+        if (item.description) form.append("description", item.description);
+      } else {
+        form.append("title", item.text || item.title || "");
+      }
+    }
+    const r = await fetch(endpoint, { method: "POST", headers: { Authorization: `Apikey ${apikey}` }, body: form });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.success === false) return { channel: item.channel, ok: false, error: data.error || data.message || `HTTP ${r.status}` };
+    return { channel: item.channel, ok: true, request_id: data.request_id || null };
+  } catch (e) { return { channel: item.channel, ok: false, error: e.message }; }
+}
+
 app.post("/post", async (req, res) => {
   try {
-    const { items, channels, package: pkg, videoUrl, imageUrl } = req.body;
-    if (!MAKE_WEBHOOK_URL) throw new Error("MAKE_WEBHOOK_URL not set");
-    // items = per-channel payloads (text in its language + the matching-language video);
-    // older single-language callers still work via the channels/package/videoUrl shape.
-    const payload = items ? { items } : { channels, package: pkg, videoUrl, imageUrl };
-    const r = await fetch(MAKE_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!r.ok) throw new Error(`Make.com ${r.status}`);
-    res.json({ posted: items ? items.map(i => i.channel) : channels });
+    const { items, channels, package: pkg, videoUrl, imageUrl, owner } = req.body;
+    const list = Array.isArray(items) ? items : [];
+    const user = owner || "raagnaai";       // Upload-Post profile name = our client id
+
+    // legacy single-payload callers (no items[]): keep old Make behaviour
+    if (!list.length) {
+      if (!MAKE_WEBHOOK_URL) throw new Error("No items and MAKE_WEBHOOK_URL not set");
+      const r = await fetch(MAKE_WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channels, package: pkg, videoUrl, imageUrl }) });
+      if (!r.ok) throw new Error(`Make.com ${r.status}`);
+      return res.json({ posted: channels || [] });
+    }
+
+    const upItems = list.filter(i => UP_PLATFORM[i.channel]);          // FB/IG/LinkedIn/YouTube/GMB -> Upload-Post
+    const makeItems = list.filter(i => !UP_PLATFORM[i.channel]);       // blog (and anything else) -> Make for now
+    const results = [];
+
+    if (upItems.length) {
+      if (!UPLOADPOST_API_KEY) throw new Error("UPLOADPOST_API_KEY not set on the server");
+      for (const it of upItems) results.push(await uploadPostOne(UPLOADPOST_API_KEY, user, it));
+    }
+    if (makeItems.length && MAKE_WEBHOOK_URL) {
+      try {
+        const r = await fetch(MAKE_WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: makeItems }) });
+        makeItems.forEach(i => results.push({ channel: i.channel, ok: r.ok, via: "make", error: r.ok ? undefined : `Make ${r.status}` }));
+      } catch (e) { makeItems.forEach(i => results.push({ channel: i.channel, ok: false, via: "make", error: e.message })); }
+    } else if (makeItems.length) {
+      makeItems.forEach(i => results.push({ channel: i.channel, ok: false, error: "Blog posting not configured (MAKE_WEBHOOK_URL missing)" }));
+    }
+
+    const posted = results.filter(r => r.ok).map(r => r.channel);
+    if (posted.length === 0) return res.status(502).json({ error: "All channels failed", results });
+    res.json({ posted, results });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
