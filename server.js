@@ -311,6 +311,7 @@ async function uploadPostOne(apikey, user, item) {
       } else if (item.channel === "facebook") {
         form.append("title", clip(item.text || item.title || "", 250));   // FB video title max 255
         form.append("description", item.text || "");                       // full caption shows as the post body
+        if (item.facebookPageId) form.append("facebook_page_id", item.facebookPageId);  // post to the chosen Page
       } else {
         form.append("title", item.text || item.title || "");               // IG / LinkedIn caption
         if (item.channel === "linkedin" && item.linkedinPageId) {
@@ -645,6 +646,20 @@ app.get("/linkedin-pages", async (req, res) => {
   if (!UPLOADPOST_API_KEY) return res.status(503).json({ error: "UPLOADPOST_API_KEY not set on the server" });
   const user = String(req.query.owner || "raagnaai");
   const hit = async (qp) => fetch(`${UP_BASE}/uploadposts/linkedin/pages?${qp}=${encodeURIComponent(user)}`, { headers: { Authorization: `Apikey ${UPLOADPOST_API_KEY}` } });
+  try {
+    let r = await hit("profile_username");
+    if (!r.ok && r.status !== 401) { const r2 = await hit("user"); if (r2.ok) r = r2; }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ error: data.error || data.message || `HTTP ${r.status}`, raw: data });
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// List a profile's Facebook pages (to pick which Page to post to when the account manages several).
+app.get("/facebook-pages", async (req, res) => {
+  if (!UPLOADPOST_API_KEY) return res.status(503).json({ error: "UPLOADPOST_API_KEY not set on the server" });
+  const user = String(req.query.owner || "raagnaai");
+  const hit = async (qp) => fetch(`${UP_BASE}/uploadposts/facebook/pages?${qp}=${encodeURIComponent(user)}`, { headers: { Authorization: `Apikey ${UPLOADPOST_API_KEY}` } });
   try {
     let r = await hit("profile_username");
     if (!r.ok && r.status !== 401) { const r2 = await hit("user"); if (r2.ok) r = r2; }
