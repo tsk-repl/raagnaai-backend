@@ -313,6 +313,9 @@ async function uploadPostOne(apikey, user, item) {
         form.append("description", item.text || "");                       // full caption shows as the post body
       } else {
         form.append("title", item.text || item.title || "");               // IG / LinkedIn caption
+        if (item.channel === "linkedin" && item.linkedinPageId) {
+          form.append("target_linkedin_page_id", String(item.linkedinPageId).replace(/^urn:li:organization:/, ""));  // post to the company page
+        }
       }
     }
     const r = await fetch(endpoint, { method: "POST", headers: { Authorization: `Apikey ${apikey}` }, body: form });
@@ -628,6 +631,20 @@ app.get("/gmb-locations", async (req, res) => {
   if (!UPLOADPOST_API_KEY) return res.status(503).json({ error: "UPLOADPOST_API_KEY not set on the server" });
   const user = String(req.query.owner || "raagnaai");
   const hit = async (qp) => fetch(`${UP_BASE}/uploadposts/google-business/locations?${qp}=${encodeURIComponent(user)}`, { headers: { Authorization: `Apikey ${UPLOADPOST_API_KEY}` } });
+  try {
+    let r = await hit("profile_username");
+    if (!r.ok && r.status !== 401) { const r2 = await hit("user"); if (r2.ok) r = r2; }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ error: data.error || data.message || `HTTP ${r.status}`, raw: data });
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// List a profile's LinkedIn company pages (to pick which page to post to instead of the personal profile).
+app.get("/linkedin-pages", async (req, res) => {
+  if (!UPLOADPOST_API_KEY) return res.status(503).json({ error: "UPLOADPOST_API_KEY not set on the server" });
+  const user = String(req.query.owner || "raagnaai");
+  const hit = async (qp) => fetch(`${UP_BASE}/uploadposts/linkedin/pages?${qp}=${encodeURIComponent(user)}`, { headers: { Authorization: `Apikey ${UPLOADPOST_API_KEY}` } });
   try {
     let r = await hit("profile_username");
     if (!r.ok && r.status !== 401) { const r2 = await hit("user"); if (r2.ok) r = r2; }
