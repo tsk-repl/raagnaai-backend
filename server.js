@@ -299,6 +299,7 @@ async function uploadPostOne(apikey, user, item) {
         throw new Error("no image for Google Business (upload a photo)");
       }
       form.append("title", item.text || item.title || "");
+      if (item.gmbLocationId) form.append("gbp_location_id", item.gmbLocationId);
       if (item.cta && item.ctaUrl) { form.append("gbp_cta_type", item.cta); form.append("gbp_cta_url", item.ctaUrl); }
     } else {
       endpoint = `${UP_BASE}/upload`;
@@ -619,6 +620,20 @@ app.put("/clients", async (req, res) => {
     const clients = Array.isArray(req.body?.clients) ? req.body.clients : [];
     await coll.updateOne({ roster }, { $set: { roster, clients, updatedAt: Date.now() } }, { upsert: true });
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// List a profile's Google Business locations (for picking which one to post to when there are several).
+app.get("/gmb-locations", async (req, res) => {
+  if (!UPLOADPOST_API_KEY) return res.status(503).json({ error: "UPLOADPOST_API_KEY not set on the server" });
+  const user = String(req.query.owner || "raagnaai");
+  const hit = async (qp) => fetch(`${UP_BASE}/uploadposts/google-business/locations?${qp}=${encodeURIComponent(user)}`, { headers: { Authorization: `Apikey ${UPLOADPOST_API_KEY}` } });
+  try {
+    let r = await hit("profile_username");
+    if (!r.ok && r.status !== 401) { const r2 = await hit("user"); if (r2.ok) r = r2; }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ error: data.error || data.message || `HTTP ${r.status}`, raw: data });
+    res.json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
