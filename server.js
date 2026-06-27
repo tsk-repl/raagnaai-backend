@@ -357,7 +357,41 @@ app.post("/post", async (req, res) => {
         const wpPass = process.env.WP_APP_PASSWORD;
         if (!wpUrl || !wpPass) throw new Error("WP_URL or WP_APP_PASSWORD not set on the server");
         const wpUser = process.env.WP_USERNAME || "Pavan Kumar TSK";
-        const auth = Buffer.from(`${wpUser}:${wpPass}`).toString("base64");
+        const authHeader = `Basic ${Buffer.from(`${wpUser}:${wpPass}`).toString("base64")}`;
+
+        // Step 1: Upload activity photo to WP Media Library with alt text
+        let featuredMediaId = null;
+        const imgData = it.imageData || null;
+        const imgType = it.imageMediaType || "image/jpeg";
+        const altText = it.altText || it.title || "";
+        if (imgData) {
+          try {
+            const imgBlob = Buffer.from(imgData, "base64");
+            const mediaRes = await fetch(`${wpUrl}/wp-json/wp/v2/media`, {
+              method: "POST",
+              headers: {
+                "Authorization": authHeader,
+                "Content-Disposition": `attachment; filename="activity-photo.jpg"`,
+                "Content-Type": imgType,
+              },
+              body: imgBlob
+            });
+            const mediaData = await mediaRes.json();
+            if (mediaRes.ok && mediaData.id) {
+              featuredMediaId = mediaData.id;
+              // Set alt text on the uploaded image
+              await fetch(`${wpUrl}/wp-json/wp/v2/media/${featuredMediaId}`, {
+                method: "POST",
+                headers: { "Authorization": authHeader, "Content-Type": "application/json" },
+                body: JSON.stringify({ alt_text: altText, caption: altText })
+              });
+            }
+          } catch (imgErr) {
+            console.error("WP media upload failed:", imgErr.message);
+          }
+        }
+
+        // Step 2: Create the post with SEO meta + featured image
         const body = {
           title: it.title || "New Post",
           content: it.html || "",
@@ -366,11 +400,12 @@ app.post("/post", async (req, res) => {
             rank_math_focus_keyword: it.focusKeyword || "",
             rank_math_description: it.metaDescription || "",
             rank_math_title: it.seoTitle || "",
-          }
+          },
+          ...(featuredMediaId ? { featured_media: featuredMediaId } : {})
         };
         const r = await fetch(`${wpUrl}/wp-json/wp/v2/posts`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Basic ${auth}` },
+          headers: { "Content-Type": "application/json", "Authorization": authHeader },
           body: JSON.stringify(body)
         });
         const data = await r.json();
