@@ -298,7 +298,7 @@ async function uploadPostOne(apikey, user, item) {
       } else {
         throw new Error("no image for Google Business (upload a photo)");
       }
-      form.append("title", item.text || item.title || "");
+      form.append("title", item.altText || item.text || item.title || "");  // SEO alt text preferred for GMB photo title
       if (item.gmbLocationId) form.append("gbp_location_id", item.gmbLocationId);
       if (item.cta && item.ctaUrl) { form.append("gbp_cta_type", item.cta); form.append("gbp_cta_url", item.ctaUrl); }
     } else {
@@ -341,21 +341,47 @@ app.post("/post", async (req, res) => {
     }
 
     const upItems = list.filter(i => UP_PLATFORM[i.channel]);          // FB/IG/LinkedIn/YouTube/GMB -> Upload-Post
-    const makeItems = list.filter(i => !UP_PLATFORM[i.channel]);       // blog (and anything else) -> Make for now
+    const blogItems = list.filter(i => i.channel === "blog");
+    const otherItems = list.filter(i => !UP_PLATFORM[i.channel] && i.channel !== "blog");
     const results = [];
 
     if (upItems.length) {
       if (!UPLOADPOST_API_KEY) throw new Error("UPLOADPOST_API_KEY not set on the server");
       for (const it of upItems) results.push(await uploadPostOne(UPLOADPOST_API_KEY, user, it));
     }
-    if (makeItems.length && MAKE_WEBHOOK_URL) {
+
+    // Direct WordPress REST API posting (no Make)
+    for (const it of blogItems) {
       try {
-        const r = await fetch(MAKE_WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: makeItems }) });
-        makeItems.forEach(i => results.push({ channel: i.channel, ok: r.ok, via: "make", error: r.ok ? undefined : `Make ${r.status}` }));
-      } catch (e) { makeItems.forEach(i => results.push({ channel: i.channel, ok: false, via: "make", error: e.message })); }
-    } else if (makeItems.length) {
-      makeItems.forEach(i => results.push({ channel: i.channel, ok: false, error: "Blog posting not configured (MAKE_WEBHOOK_URL missing)" }));
+        const wpUrl = process.env.WP_URL;
+        const wpPass = process.env.WP_APP_PASSWORD;
+        if (!wpUrl || !wpPass) throw new Error("WP_URL or WP_APP_PASSWORD not set on the server");
+        const auth = Buffer.from(`raagnaaiads:${wpPass}`).toString("base64");
+        const body = {
+          title: it.title || "New Post",
+          content: it.html || "",
+          status: "publish",
+          meta: {
+            rank_math_focus_keyword: it.focusKeyword || "",
+            rank_math_description: it.metaDescription || "",
+            rank_math_title: it.seoTitle || "",
+          }
+        };
+        const r = await fetch(`${wpUrl}/wp-json/wp/v2/posts`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Basic ${auth}` },
+          body: JSON.stringify(body)
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data?.message || `WP ${r.status}`);
+        results.push({ channel: "blog", ok: true, via: "wordpress", postId: data.id, postUrl: data.link });
+      } catch (e) {
+        results.push({ channel: "blog", ok: false, via: "wordpress", error: e.message });
+      }
     }
+
+    // anything else not handled — report as unrouted
+    otherItems.forEach(i => results.push({ channel: i.channel, ok: false, error: "Channel not configured" }));
 
     const posted = results.filter(r => r.ok).map(r => r.channel);
     if (posted.length === 0) return res.status(502).json({ error: "All channels failed", results });
@@ -401,13 +427,15 @@ LANGUAGES — this is critical:
 VIDEO SCRIPTS: in "scripts", include ONE entry per requested video-language key (e.g. "te","en"). full_voiceover_text is ONLY spoken words (no stage directions), tight (15-40s). on_screen_text is a short overlay line in that same language.
 
 Output ONLY this JSON (include captions/sections only for requested platforms; always strategy + scripts + image_brief):
-{"strategy":{"angle":"","target_emotion":"","cta":""},"scripts":{"<langkey>":{"full_voiceover_text":"","on_screen_text":"","estimated_seconds":0}},"captions":{"facebook":{"text":"","hashtags":[]},"instagram":{"text":"","hashtags":[]},"linkedin":{"text":"","hashtags":[]}},"youtube":{"title":"","description":""},"gmb_post":{"text":"","cta_button_type":"CALL|BOOK|LEARN_MORE|ORDER"},"blog":{"title":"","body_html":"","focus_keyword":"","meta_description":"","seo_title":""},"image_brief":{"concept":"","style":""}}
+{"strategy":{"angle":"","target_emotion":"","cta":""},"scripts":{"<langkey>":{"full_voiceover_text":"","on_screen_text":"","estimated_seconds":0}},"captions":{"facebook":{"text":"","hashtags":[]},"instagram":{"text":"","hashtags":[]},"linkedin":{"text":"","hashtags":[]}},"youtube":{"title":"","description":""},"gmb_post":{"text":"","cta_button_type":"CALL|BOOK|LEARN_MORE|ORDER"},"blog":{"title":"","body_html":"","focus_keyword":"","meta_description":"","seo_title":""},"image_brief":{"concept":"","style":""},"image_alt_text":""}
 Blog (SEO-ready, all fields required when blog is requested):
 - focus_keyword: ONE short search phrase (2-4 words) a local customer would actually search (e.g. "auto top advertising Hyderabad"). Pick it FIRST, then build everything around it.
 - body_html: valid HTML (<p>, <h2>, <strong>), no markdown, 600-750 words. The focus_keyword MUST appear in the FIRST sentence, in at least one <h2>, and naturally 3-5 times across the body. Use 2-3 <h2> subheadings. Substantive and specific to THIS activity, not padding.
 - title: compelling headline that contains the focus_keyword.
 - seo_title: <= 60 characters, contains the focus_keyword (this is the search-engine title; can differ slightly from title).
-- meta_description: 140-156 characters, contains the focus_keyword, ends with a clear reason to click.`;
+- meta_description: 140-156 characters, contains the focus_keyword, ends with a clear reason to click.
+
+image_alt_text: ONE sentence, max 125 characters. Describe what is physically visible in the activity photo — the ad format, the brand/client name, the location (area + city). Must contain 1-2 SEO keywords a local customer would search. Example: "Flex banner installation for Vignan School Scholarship Week, Ghatkesar Hyderabad — outdoor advertising by Raagnaai Ads".`;
 }
 function synthPrompt(dna) {
   return `You are the chief editor of Raagnaai Ads' marketing brain. Several AI models each wrote an independent content package for the same brief. Produce ONE final package that is BETTER than any single draft. Do NOT average — choose the strongest strategic angle, the most natural-sounding wording in EACH language (must read like a real speaker, never translated), the sharpest hook, and the single clearest CTA, then combine the best parts. Keep the EXACT same JSON schema and the same language keys, and output ONLY JSON.
