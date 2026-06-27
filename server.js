@@ -356,7 +356,8 @@ app.post("/post", async (req, res) => {
         const wpUrl = process.env.WP_URL;
         const wpPass = process.env.WP_APP_PASSWORD;
         if (!wpUrl || !wpPass) throw new Error("WP_URL or WP_APP_PASSWORD not set on the server");
-        const auth = Buffer.from(`raagnaaiads:${wpPass}`).toString("base64");
+        const wpUser = process.env.WP_USERNAME || "Pavan Kumar TSK";
+        const auth = Buffer.from(`${wpUser}:${wpPass}`).toString("base64");
         const body = {
           title: it.title || "New Post",
           content: it.html || "",
